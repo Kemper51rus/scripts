@@ -140,12 +140,8 @@ clone_repo() {
 }
 
 prepare_pnpm_build_approvals() {
-  log "Готовлю разрешения build scripts для pnpm"
+  log "Готовлю pnpm-workspace.yaml для разрешённых build scripts"
   cd "$APP_DIR"
-
-  if sudo -u "$APP_USER" pnpm approve-builds --all >/dev/null 2>&1; then
-    return
-  fi
 
   if [ ! -f "$APP_DIR/pnpm-workspace.yaml" ]; then
     cat > "$APP_DIR/pnpm-workspace.yaml" <<'EOF'
