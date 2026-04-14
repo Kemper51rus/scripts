@@ -139,18 +139,45 @@ clone_repo() {
   chown -R "${APP_USER}:${APP_GROUP}" "$APP_DIR"
 }
 
+prepare_pnpm_build_approvals() {
+  log "Готовлю разрешения build scripts для pnpm"
+  cd "$APP_DIR"
+
+  if sudo -u "$APP_USER" pnpm approve-builds --all >/dev/null 2>&1; then
+    return
+  fi
+
+  if [ ! -f "$APP_DIR/pnpm-workspace.yaml" ]; then
+    cat > "$APP_DIR/pnpm-workspace.yaml" <<'EOF'
+onlyBuiltDependencies:
+  - core-js
+  - cpu-features
+  - esbuild
+  - protobufjs
+  - ssh2
+EOF
+    chown "$APP_USER:$APP_GROUP" "$APP_DIR/pnpm-workspace.yaml"
+    return
+  fi
+
+  if ! grep -q '^onlyBuiltDependencies:' "$APP_DIR/pnpm-workspace.yaml"; then
+    cat >> "$APP_DIR/pnpm-workspace.yaml" <<'EOF'
+
+onlyBuiltDependencies:
+  - core-js
+  - cpu-features
+  - esbuild
+  - protobufjs
+  - ssh2
+EOF
+    chown "$APP_USER:$APP_GROUP" "$APP_DIR/pnpm-workspace.yaml"
+  fi
+}
+
 install_dependencies() {
   log "Устанавливаю зависимости проекта"
   cd "$APP_DIR"
   sudo -u "$APP_USER" pnpm install
-}
-
-approve_builds_if_needed() {
-  log "Разрешаю build scripts для pnpm"
-  cd "$APP_DIR"
-
-  sudo -u "$APP_USER" pnpm config set onlyBuiltDependencies "core-js,cpu-features,esbuild,protobufjs,ssh2" || true
-  sudo -u "$APP_USER" pnpm rebuild || true
 }
 
 create_initial_config() {
@@ -263,8 +290,8 @@ install_homepage() {
   ensure_pnpm
   ensure_user
   clone_repo
+  prepare_pnpm_build_approvals
   install_dependencies
-  approve_builds_if_needed
   create_initial_config
   build_project
   write_env_file
@@ -288,15 +315,14 @@ update_homepage() {
   ask_hosts_update
   ensure_packages
   ensure_pnpm
+  ensure_user
 
   log "Обновляю репозиторий"
   cd "$APP_DIR"
   sudo -u "$APP_USER" git pull
 
-  log "Обновляю зависимости"
-  sudo -u "$APP_USER" pnpm install
-
-  approve_builds_if_needed
+  prepare_pnpm_build_approvals
+  install_dependencies
   build_project
   write_env_file
   write_systemd_service
@@ -345,6 +371,11 @@ remove_homepage() {
   if id -u "$APP_USER" >/dev/null 2>&1; then
     log "Удаляю пользователя ${APP_USER}"
     userdel -r "$APP_USER" 2>/dev/null || userdel "$APP_USER" 2>/dev/null || true
+  fi
+
+  if [ -f "$SELF_INSTALL_PATH" ]; then
+    log "Удаляю команду ${SELF_INSTALL_PATH}"
+    rm -f "$SELF_INSTALL_PATH"
   fi
 
   echo
