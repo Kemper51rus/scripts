@@ -54,22 +54,52 @@ install_self_to_bin() {
   fi
 }
 
-read_current_hosts() {
+read_env_var() {
+  local key="$1"
   if [ -f "$ENV_FILE" ]; then
-    # shellcheck disable=SC1090
-    . "$ENV_FILE"
+    grep -E "^${key}=" "$ENV_FILE" | head -n1 | cut -d= -f2- || true
   fi
-  echo "${HOMEPAGE_ALLOWED_HOSTS:-}"
+}
+
+read_current_hosts() {
+  read_env_var "HOMEPAGE_ALLOWED_HOSTS"
+}
+
+read_current_config_dir() {
+  read_env_var "CONFIG_REAL_DIR"
+}
+
+read_current_images_dir() {
+  read_env_var "IMAGES_REAL_DIR"
 }
 
 ask_hosts_install() {
+  local default_hosts="jexum.ru"
+
   echo
   echo "Введите HOMEPAGE_ALLOWED_HOSTS"
   echo "Примеры:"
   echo "  jexum.ru"
   echo "  jexum.ru,localhost:3000,127.0.0.1:3000"
-  read -r -p "HOMEPAGE_ALLOWED_HOSTS: " HOMEPAGE_ALLOWED_HOSTS
+  read -r -p "HOMEPAGE_ALLOWED_HOSTS [${default_hosts}]: " HOMEPAGE_ALLOWED_HOSTS
+  HOMEPAGE_ALLOWED_HOSTS="${HOMEPAGE_ALLOWED_HOSTS:-$default_hosts}"
+
   [ -n "${HOMEPAGE_ALLOWED_HOSTS:-}" ] || fail "HOMEPAGE_ALLOWED_HOSTS не задан"
+}
+
+ask_storage_paths_install() {
+  local default_config_dir="/srv/homepage-config"
+  local default_images_dir="/srv/homepage-images"
+
+  echo
+  read -r -p "Папка для конфигов [${default_config_dir}]: " CONFIG_REAL_DIR
+  CONFIG_REAL_DIR="${CONFIG_REAL_DIR:-$default_config_dir}"
+
+  read -r -p "Папка для картинок [${default_images_dir}]: " IMAGES_REAL_DIR
+  IMAGES_REAL_DIR="${IMAGES_REAL_DIR:-$default_images_dir}"
+
+  [ -n "${CONFIG_REAL_DIR:-}" ] || fail "Не задан путь для конфигов"
+  [ -n "${IMAGES_REAL_DIR:-}" ] || fail "Не задан путь для картинок"
 }
 
 ask_hosts_update() {
@@ -89,6 +119,34 @@ ask_hosts_update() {
       ;;
     2)
       ask_hosts_install
+      ;;
+    *)
+      fail "Неверный выбор"
+      ;;
+  esac
+}
+
+ask_storage_paths_update() {
+  local current_config_dir current_images_dir
+  current_config_dir="$(read_current_config_dir)"
+  current_images_dir="$(read_current_images_dir)"
+
+  echo
+  echo "Текущая папка конфигов: ${current_config_dir:-<не задана>}"
+  echo "Текущая папка картинок: ${current_images_dir:-<не задана>}"
+  echo "1) Оставить текущие"
+  echo "2) Ввести новые"
+  read -r -p "Выберите вариант [1-2]: " path_choice
+
+  case "$path_choice" in
+    1)
+      CONFIG_REAL_DIR="$current_config_dir"
+      IMAGES_REAL_DIR="$current_images_dir"
+      [ -n "${CONFIG_REAL_DIR:-}" ] || fail "Текущая папка конфигов не задана"
+      [ -n "${IMAGES_REAL_DIR:-}" ] || fail "Текущая папка картинок не задана"
+      ;;
+    2)
+      ask_storage_paths_install
       ;;
     *)
       fail "Неверный выбор"
@@ -130,6 +188,13 @@ ensure_user() {
   else
     log "Пользователь ${APP_USER} уже существует"
   fi
+}
+
+ensure_storage_dirs() {
+  log "Создаю внешние каталоги данных"
+  mkdir -p "$CONFIG_REAL_DIR"
+  mkdir -p "$IMAGES_REAL_DIR"
+  chown -R "${APP_USER}:${APP_GROUP}" "$CONFIG_REAL_DIR" "$IMAGES_REAL_DIR"
 }
 
 clone_repo() {
@@ -177,11 +242,24 @@ install_dependencies() {
 }
 
 create_initial_config() {
-  log "Создаю стартовый config"
-  cd "$APP_DIR"
-  if [ ! -d "$APP_DIR/config" ]; then
-    sudo -u "$APP_USER" cp -r "$APP_DIR/src/skeleton" "$APP_DIR/config"
+  log "Создаю стартовый каркас config во внешней папке"
+  if [ ! -f "$CONFIG_REAL_DIR/settings.yaml" ] && [ ! -f "$CONFIG_REAL_DIR/services.yaml" ]; then
+    sudo -u "$APP_USER" cp -r "$APP_DIR/src/skeleton/." "$CONFIG_REAL_DIR/"
   fi
+}
+
+link_external_dirs() {
+  log "Подключаю внешние папки через symlink"
+
+  rm -rf "$APP_DIR/config"
+  ln -s "$CONFIG_REAL_DIR" "$APP_DIR/config"
+
+  mkdir -p "$APP_DIR/public"
+  rm -rf "$APP_DIR/public/images"
+  ln -s "$IMAGES_REAL_DIR" "$APP_DIR/public/images"
+
+  chown -h "$APP_USER:$APP_GROUP" "$APP_DIR/config" || true
+  chown -h "$APP_USER:$APP_GROUP" "$APP_DIR/public/images" || true
 }
 
 build_project() {
@@ -203,6 +281,8 @@ write_env_file() {
   log "Сохраняю переменные окружения"
   cat > "$ENV_FILE" <<EOF
 HOMEPAGE_ALLOWED_HOSTS=${HOMEPAGE_ALLOWED_HOSTS}
+CONFIG_REAL_DIR=${CONFIG_REAL_DIR}
+IMAGES_REAL_DIR=${IMAGES_REAL_DIR}
 EOF
   chmod 600 "$ENV_FILE"
 }
@@ -282,13 +362,16 @@ start_services() {
 
 install_homepage() {
   ask_hosts_install
+  ask_storage_paths_install
   ensure_packages
   ensure_pnpm
   ensure_user
+  ensure_storage_dirs
   clone_repo
   prepare_pnpm_build_approvals
   install_dependencies
   create_initial_config
+  link_external_dirs
   build_project
   write_env_file
   write_systemd_service
@@ -300,18 +383,22 @@ install_homepage() {
 
   echo
   echo "Готово."
-  echo "Сайт:    http://${primary_host}"
-  echo "Сервис:  systemctl status ${SERVICE_NAME}"
-  echo "Логи:    journalctl -u ${SERVICE_NAME} -f"
-  echo "Команда: update"
+  echo "Сайт:           http://${primary_host}"
+  echo "Конфиги:        ${CONFIG_REAL_DIR}"
+  echo "Картинки:       ${IMAGES_REAL_DIR}"
+  echo "Сервис:         systemctl status ${SERVICE_NAME}"
+  echo "Логи:           journalctl -u ${SERVICE_NAME} -f"
+  echo "Команда:        update"
 }
 
 update_homepage() {
   [ -d "${APP_DIR}/.git" ] || fail "Homepage не найден в ${APP_DIR}"
   ask_hosts_update
+  ask_storage_paths_update
   ensure_packages
   ensure_pnpm
   ensure_user
+  ensure_storage_dirs
 
   log "Обновляю репозиторий"
   cd "$APP_DIR"
@@ -319,6 +406,8 @@ update_homepage() {
 
   prepare_pnpm_build_approvals
   install_dependencies
+  create_initial_config
+  link_external_dirs
   build_project
   write_env_file
   write_systemd_service
@@ -330,13 +419,28 @@ update_homepage() {
 
   echo
   echo "Обновление завершено."
-  echo "Сайт: http://${primary_host}"
-  echo "Команда: update"
+  echo "Сайт:           http://${primary_host}"
+  echo "Конфиги:        ${CONFIG_REAL_DIR}"
+  echo "Картинки:       ${IMAGES_REAL_DIR}"
+  echo "Команда:        update"
 }
 
 remove_homepage() {
+  local current_config_dir current_images_dir
+  current_config_dir="$(read_current_config_dir)"
+  current_images_dir="$(read_current_images_dir)"
+
   echo
-  read -r -p "Точно удалить Homepage, nginx-конфиг и пользователя ${APP_USER}? [y/N]: " confirm
+  echo "Будет удалено:"
+  echo "  - приложение ${APP_DIR}"
+  echo "  - systemd сервис ${SERVICE_NAME}"
+  echo "  - nginx-конфиг"
+  echo "  - пользователь ${APP_USER}"
+  echo "Внешние папки по умолчанию НЕ удаляются:"
+  echo "  - ${current_config_dir:-<не задано>}"
+  echo "  - ${current_images_dir:-<не задано>}"
+
+  read -r -p "Точно удалить Homepage? [y/N]: " confirm
   case "$confirm" in
     y|Y|yes|YES)
       ;;
@@ -376,6 +480,9 @@ remove_homepage() {
 
   echo
   echo "Homepage удалён."
+  echo "Внешние папки с данными сохранены:"
+  echo "  ${current_config_dir:-<не задано>}"
+  echo "  ${current_images_dir:-<не задано>}"
 }
 
 show_menu() {
