@@ -38,6 +38,10 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+detect_container_ip() {
+  ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}'
+}
+
 install_self_to_bin() {
   local src
   src="$(readlink -f "$0" 2>/dev/null || echo "$0")"
@@ -74,13 +78,20 @@ read_current_images_dir() {
 }
 
 ask_hosts_install() {
-  local default_hosts="jexum.ru"
+  local detected_ip default_hosts
+  detected_ip="$(detect_container_ip || true)"
+
+  if [ -n "$detected_ip" ]; then
+    default_hosts="jexum.ru,${detected_ip}:${APP_PORT}"
+  else
+    default_hosts="jexum.ru"
+  fi
 
   echo
   echo "Введите HOMEPAGE_ALLOWED_HOSTS"
   echo "Примеры:"
   echo "  jexum.ru"
-  echo "  jexum.ru,localhost:3000,127.0.0.1:3000"
+  echo "  jexum.ru,192.168.1.50:3000"
   read -r -p "HOMEPAGE_ALLOWED_HOSTS [${default_hosts}]: " HOMEPAGE_ALLOWED_HOSTS
   HOMEPAGE_ALLOWED_HOSTS="${HOMEPAGE_ALLOWED_HOSTS:-$default_hosts}"
 
