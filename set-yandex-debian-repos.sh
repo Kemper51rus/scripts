@@ -2,12 +2,15 @@
 set -euo pipefail
 
 FILE="/etc/apt/sources.list.d/debian.sources"
-BACKUP="/etc/apt/sources.list.d/debian.sources.bak.$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="/root/apt-backups"
+BACKUP="$BACKUP_DIR/debian.sources.bak.$(date +%Y%m%d-%H%M%S)"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Ошибка: запусти скрипт от root."
   exit 1
 fi
+
+mkdir -p "$BACKUP_DIR"
 
 if [ -f "$FILE" ]; then
   cp -a "$FILE" "$BACKUP"
